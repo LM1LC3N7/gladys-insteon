@@ -1,0 +1,223 @@
+// -----------------------------------------------------------------------------
+// States and scene events to Gladys, under the host API limits (300 states
+// and 300 events per minute per integration).
+//
+// The publisher of LM1LC3N7/gladys-velbus (same author, same licence):
+// - only a value that differs from the last one Gladys accepted is queued,
+//   plus a heartbeat of each unchanged value every 30 minutes, offset per
+//   feature over 5 minutes so that the heartbeats never come in one burst;
+// - one budget of 300 states per minute for every publication, simultaneous
+//   ones included (they go one after the other); over it, the latest value of
+//   each feature waits for the next minute instead of being refused;
+// - scene events (button presses) over their budget (120 per minute) are
+//   refused at the entry, with one log line per minute at most.
+// Nothing here is awaited by a command: the ack of a command never waits for
+// the publication of its state.
+// -----------------------------------------------------------------------------
+
+import { LIMITS, TIMINGS } from './constants.js';
+
+const WINDOW = 60_000;
+/** publishStates takes at most 100 states per request. */
+const BATCH = 100;
+
+export class Budget {
+  constructor(perMinute, now) {
+    this.perMinute = perMinute;
+    this.now = now;
+    this.entries = [];
+  }
+
+  prune() {
+    const limit = this.now() - WINDOW;
+    while (this.entries.length > 0 && this.entries[0].at <= limit) this.entries.shift();
+  }
+
+  get left() {
+    this.prune();
+    return this.perMinute - this.entries.reduce((sum, entry) => sum + entry.count, 0);
+  }
+
+  /** When the oldest spending leaves the window (ms from now). */
+  get wait() {
+    this.prune();
+    return this.entries.length === 0 ? 0 : Math.max(1, this.entries[0].at + WINDOW - this.now());
+  }
+
+  spend(count) {
+    if (count > 0) this.entries.push({ at: this.now(), count });
+  }
+}
+
+/** A stable offset in [0, spread) per feature id. */
+function offset(id, spread) {
+  let hash = 0;
+  for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return hash % spread;
+}
+
+const valueKey = (state) => JSON.stringify(state.state ?? null);
+
+export class StatePublisher {
+  constructor({ gladys, logger, now = Date.now, timers = globalThis }) {
+    this.gladys = gladys;
+    this.logger = logger;
+    this.now = now;
+    this.timers = timers;
+    this.budget = new Budget(LIMITS.statesPerMinute, now);
+    this.events = new Budget(LIMITS.eventsPerMinute, now);
+    /** feature external id -> { key, at }: the last value Gladys accepted. */
+    this.last = new Map();
+    /** feature external id -> state entry, the latest value only. */
+    this.pending = new Map();
+    this.chain = Promise.resolve();
+    this.timer = undefined;
+    /** feature external id -> value key of the request on its way to Gladys. */
+    this.inflight = new Map();
+    /** Ids forgotten while their value was on its way: queued again when it lands. */
+    this.forgotten = new Set();
+    this.droppedSince = undefined;
+    this.dropped = 0;
+  }
+
+  heartbeat(id) {
+    return TIMINGS.stateHeartbeat + offset(id, TIMINGS.heartbeatSpread);
+  }
+
+  /** Queues the states that changed (or whose heartbeat is due), then sends what the budget allows. */
+  publish(states) {
+    const now = this.now();
+    for (const state of states) {
+      const id = state.device_feature_external_id;
+      const key = valueKey(state);
+      const sending = this.inflight.get(id);
+      if (sending !== undefined) {
+        // A value of this feature is on its way: compare with it.
+        this.pending.delete(id);
+        if (sending !== key) this.pending.set(id, state);
+        continue;
+      }
+      const last = this.last.get(id);
+      if (last && last.key === key && now - last.at < this.heartbeat(id)) {
+        this.pending.delete(id);
+        continue;
+      }
+      // Re-inserted at the end: the order of the changes is kept.
+      this.pending.delete(id);
+      this.pending.set(id, state);
+    }
+    return this.flush();
+  }
+
+  /** Gladys lost these values (a device created or updated, a reconnection): send them again. */
+  forget(externalId) {
+    const matches = (id) =>
+      externalId === undefined || id === externalId || id.startsWith(`${externalId}:`);
+    for (const id of this.inflight.keys()) if (matches(id)) this.forgotten.add(id);
+    if (externalId === undefined) {
+      this.last.clear();
+      return;
+    }
+    for (const id of this.last.keys()) {
+      if (matches(id)) this.last.delete(id);
+    }
+  }
+
+  flush() {
+    this.chain = this.chain.then(() => this.send()).catch(() => undefined);
+    return this.chain;
+  }
+
+  async send() {
+    if (this.pending.size === 0) return;
+    const left = this.budget.left;
+    const batch = [...this.pending.values()].slice(0, Math.max(0, left));
+    if (batch.length === 0) {
+      this.later();
+      return;
+    }
+    for (const state of batch) this.pending.delete(state.device_feature_external_id);
+    for (let i = 0; i < batch.length; i += BATCH) {
+      const part = batch.slice(i, i + BATCH);
+      for (const state of part) {
+        this.inflight.set(state.device_feature_external_id, valueKey(state));
+      }
+      try {
+        await this.gladys.publishStates(part);
+        const at = this.now();
+        for (const state of part) {
+          const id = state.device_feature_external_id;
+          if (this.forgotten.delete(id)) {
+            this.last.delete(id);
+            if (!this.pending.has(id)) this.pending.set(id, state);
+          } else {
+            this.last.set(id, { key: valueKey(state), at });
+          }
+          this.inflight.delete(id);
+        }
+      } catch (err) {
+        for (const state of part) {
+          this.inflight.delete(state.device_feature_external_id);
+          this.forgotten.delete(state.device_feature_external_id);
+        }
+        this.logger.warn(`Publishing the states failed: ${err.message}`);
+        for (const state of part) {
+          if (!this.pending.has(state.device_feature_external_id)) {
+            this.pending.set(state.device_feature_external_id, state);
+          }
+        }
+      }
+      this.budget.spend(part.length);
+    }
+    if (this.pending.size > 0) this.later();
+  }
+
+  later() {
+    if (this.timer) return;
+    this.timer = this.timers.setTimeout(() => {
+      this.timer = undefined;
+      this.flush();
+    }, this.budget.wait || 1_000);
+  }
+
+  /**
+   * Takes one scene event from the budget of the minute, when the event comes
+   * in: false over it (counted, one log line per minute at most).
+   */
+  reserveEvent() {
+    if (this.events.left <= 0) {
+      this.dropped += 1;
+      if (this.droppedSince === undefined || this.now() - this.droppedSince >= WINDOW) {
+        this.logger.warn(
+          `Scene events refused: more than ${LIMITS.eventsPerMinute} per minute (${this.dropped} so far)`,
+        );
+        this.droppedSince = this.now();
+      }
+      return false;
+    }
+    this.events.spend(1);
+    return true;
+  }
+
+  /** A scene event whose budget was taken by reserveEvent(); never undefined nor NaN in the data. */
+  async sceneEvent(key, data) {
+    const clean = Object.fromEntries(
+      Object.entries(data).map(([k, v]) => [
+        k,
+        v === undefined || (typeof v === 'number' && !Number.isFinite(v)) ? null : v,
+      ]),
+    );
+    try {
+      await this.gladys.publishSceneEvent(key, clean);
+    } catch (err) {
+      this.logger.warn(`Scene event ${key} refused: ${err.message}`);
+    }
+  }
+
+  stop() {
+    if (this.timer) {
+      this.timers.clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+  }
+}
