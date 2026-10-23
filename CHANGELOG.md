@@ -28,3 +28,22 @@ the notes of the version's GitHub Release.
 - A refused password stops for good (no automatic retry); other failures are
   retried at 10 s, 30 s, 1, 2, then 5 minutes, the pause kept across a
   restart. "Test the connection".
+
+### Security
+
+- The identity of the hub is read again at every connection; nothing is read
+  nor sent before (a command at the start of a session could leave through
+  another hub).
+- An answer counts only after the echo of its own message: an old ACK left in
+  a buffer the hub did not clear never confirms a new command, and the ACK of
+  a command is never taken by the next one.
+- A device's type never changes on a message (a forged broadcast could make
+  an I/O Linc look like a switch).
+
+### Fixed
+
+- Brightness 100 % is confirmed only by 100 %.
+- A command waiting behind a hanging request is refused at its deadline.
+- Outages no longer add background loops (extra identity reads).
+- Docs: battery sensors and the Smoke Bridge are never read again; the
+  variable `name` and group 0 of the trigger.

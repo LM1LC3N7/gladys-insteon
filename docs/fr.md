@@ -87,12 +87,13 @@ Chaque appui sur un bouton de clavier, de télécommande ou sur un interrupteur
 
 - `address` : l'adresse de l'appareil, en majuscules avec des points, comme
   sur son étiquette (`1A.2B.3C`) : elle est comparée telle quelle ;
-- `button` : le bouton (groupe Insteon) : 1 pour un interrupteur, 1 à 8 sur
-  un clavier ;
+- `button` : le bouton (groupe Insteon, 0 à 255) : 1 pour un interrupteur,
+  1 à 8 sur un clavier ; quelques appareils envoient le groupe 0 ;
 - `action` : `on`, `off`, `fast_on`, `fast_off` (double appui), `dim_start`
   (maintenu), `dim_stop` (relâché).
 
-120 événements par minute au plus.
+La variable `name` donne le modèle de l'appareil (vide tant que son type
+n'est pas connu). 120 événements par minute au plus.
 
 ## Lectures et limites
 
@@ -102,11 +103,19 @@ Chaque appui sur un bouton de clavier, de télécommande ou sur un interrupteur
   interrupteurs et I/O Linc sont relus. Un redémarrage de l'intégration ne
   relit jamais plus tôt.
 - Les messages arrivés dans le hub juste avant l'envoi d'une commande peuvent
-  être perdus (la mémoire du hub est vidée avant chaque message) ; la lecture
-  suivante rattrape.
-- **Un autre hub** qui répond à la même adresse IP (après un changement de
-  box) : rien n'est lu ni envoyé tant que vous ne saisissez pas son adresse
-  Insteon.
+  être perdus (la mémoire du hub est vidée avant chaque message). Pour les
+  variateurs, interrupteurs et I/O Linc, la lecture suivante rattrape. **Les
+  détecteurs sur pile (mouvement, ouverture, fuite) et le Smoke Bridge ne sont
+  jamais relus** : un message perdu n'est rattrapé que par le message suivant
+  de l'appareil, son message de confirmation (cleanup) ou son signal de vie
+  (jusqu'à 24 h pour un détecteur de fuite). Ne comptez pas sur Gladys seul
+  pour les alarmes de fumée, de CO ou de fuite.
+- L'identité du hub (son adresse Insteon) est relue à chaque connexion ;
+  jusque-là rien n'est lu ni envoyé. **Un autre hub** qui répond à la même
+  adresse IP (après un changement de box) : rien n'est lu ni envoyé tant que
+  vous ne saisissez pas son adresse Insteon.
+- Le type d'un appareil, une fois connu, ne change jamais (un message forgé ou
+  abîmé ne peut pas faire d'une I/O Linc un interrupteur).
 - **Mot de passe refusé** : l'intégration s'arrête et ne réessaie jamais
   seule. Corrigez le mot de passe, ou cliquez sur « Tester la connexion » quand
   le hub l'accepte.

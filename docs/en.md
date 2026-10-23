@@ -81,11 +81,13 @@ linked to the hub) fires the trigger with:
 
 - `address`: the address of the device, upper case with dots, as on its label
   (`1A.2B.3C`): it is compared as written;
-- `button`: the button (Insteon group): 1 for a paddle, 1 to 8 on a keypad;
+- `button`: the button (Insteon group, 0 to 255): 1 for a paddle, 1 to 8 on a
+  keypad; a few devices send group 0;
 - `action`: `on`, `off`, `fast_on`, `fast_off` (double press), `dim_start`
   (held), `dim_stop` (released).
 
-120 events per minute at most.
+The variable `name` gives the model of the device (empty when its type is not
+known yet). 120 events per minute at most.
 
 ## Readings and limits
 
@@ -94,10 +96,17 @@ linked to the hub) fires the trigger with:
   default) the dimmers, switches and I/O Linc are read again. A restart of
   the integration never reads sooner.
 - Messages that arrive in the hub just before a command is sent may be lost
-  (the hub buffer is cleared before each message); the next reading catches
-  up.
-- **Another hub** answering at the same IP address (after a router change):
-  nothing is read nor sent until you enter its Insteon address.
+  (the hub buffer is cleared before each message). For dimmers, switches and
+  I/O Linc the next reading catches up. **Battery sensors (motion, door, leak)
+  and the Smoke Bridge are never read**: a lost message is only caught up by
+  the device's next message, its cleanup message or its heartbeat (up to 24 h
+  for a leak sensor). Do not rely on Gladys alone for smoke, CO or leak alarms.
+- The identity of the hub (its Insteon address) is read at every connection;
+  until then nothing is read nor sent. **Another hub** answering at the same
+  IP address (after a router change): nothing is read nor sent until you enter
+  its Insteon address.
+- A device's type, once known, never changes (a forged or damaged message
+  cannot turn an I/O Linc into a switch).
 - **Password refused**: the integration stops and never tries again by
   itself. Correct the password, or click "Test the connection" once the hub
   accepts it.

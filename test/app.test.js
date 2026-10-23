@@ -171,11 +171,11 @@ test('a declared dimmer: brightness sent, confirmed by the level the device answ
   const off = await ctx.command(RELAY, 'light', 0);
   assert.equal(off.success, true, off.error);
   assert.equal(ctx.hub.writes.at(-1), '02622B3C4D0F1300');
-  // The buffer is read, then cleared, right before each message.
+  // The buffer is read, cleared and read again right before each message.
   const i = ctx.hub.requests.findLastIndex((r) => r.path.startsWith('/3?'));
   assert.deepEqual(
-    ctx.hub.requests.slice(i - 2, i).map((r) => r.path),
-    ['/buffstatus.xml', '/1?XB=M=1'],
+    ctx.hub.requests.slice(i - 3, i).map((r) => r.path),
+    ['/buffstatus.xml', '/1?XB=M=1', '/buffstatus.xml'],
   );
 });
 

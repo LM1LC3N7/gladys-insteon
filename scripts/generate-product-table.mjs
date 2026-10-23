@@ -29,6 +29,11 @@ for (const match of body.matchAll(entry)) {
   if (cat === 'None' || subcat === 'None') continue;
   rows.push([Number(cat), Number(subcat), description, model, deviceClass]);
 }
+// pyinsteon lists some sub-categories twice; its lookup keeps the last one: so here.
+const byKey = new Map();
+for (const row of rows) byKey.set(row[0] * 256 + row[1], row);
+rows.length = 0;
+rows.push(...byKey.values());
 if (rows.length < 100) throw new Error(`only ${rows.length} products read: wrong file?`);
 const lines = rows.map(
   ([cat, subcat, description, model, deviceClass]) =>

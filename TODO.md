@@ -23,6 +23,8 @@ up to date at the end of every milestone.
       and leak sensors, Smoke Bridge, I/O Linc read only; button presses as a
       scene trigger; hub identity pinned; "Test the connection"; fr/en.
       Tested against an in-memory hub and a local HTTP server only.
+- [x] **Review 1 fixes** (2026-10-23, review of 722e54a: 5 important, 7
+      minor): see "Decisions after review 1" below.
 - [ ] **Milestone 2 - real hub**: run against a Hub 2245; capture real buffers
       (anonymised) as fixtures; fix what differs (see below).
 - [ ] **Milestone 3 - more**: thermostats (extended get 0x2E, °F/°C, set
@@ -38,9 +40,11 @@ up to date at the end of every milestone.
 ## To check on a real hub
 
 - That a `/3?…=I=3` request clears the buffer (pyinsteon resets its position
-  to 0 after it): the integration clears it itself before each message, so
-  either way an answer is only taken from what came after; but messages that
-  arrive between the read and the clear are lost.
+  to 0 after it), and that `/1?XB=M=1` does: the integration reads the
+  position after its own clear and takes an answer only after its echo, so a
+  hub that clears on neither works; one that clears on the message only but
+  not on `/1?XB=M=1` may leave commands unconfirmed. Messages that arrive
+  between the read and the clear are lost.
 - POST (pyinsteon) or GET for the messages: POST is used here.
 - The hub's "strong NAK" (a run of 0x15 instead of the echo, handled by
   pyinsteon): here the command waits for the device's answer, else "sent,
@@ -170,3 +174,49 @@ up to date at the end of every milestone.
 - **Not checked**: Docker is not installed on this PC, so no image build and
   no end-to-end test in a container; never run against a real hub. The store
   validator could not be run from the development agent.
+
+## Decisions after review 1 (2026-10-23)
+
+These replace what they contradict above.
+
+- **I-1 - identity per connection**: every `up` and `down` of the hub session
+  forgets the identity read before (`unknown`, the address seen dropped).
+  Until Get IM Info is read in the current connection, nothing is read from
+  the hub (messages ignored, no scan, no round) and every command is refused
+  "the identity of the hub is not known yet: nothing was sent"; the last
+  check before the request requires `identity === 'ok'` and the same hub
+  address. The address pinned in `/data` is only what the read is compared
+  with, never a licence to send.
+- **I-2 - answers after their own echo**: before each message the buffer is
+  read, cleared, and read again (where the hub writes now, whether it
+  cleared or not: the position is no longer reset to 0). A waiter takes
+  nothing before the echo of its exact bytes; the echo is offered to its
+  `match` (Get IM Info answers in it, a database read ends on its NAK); after
+  an echo acknowledged by the modem (06) the following messages count; a
+  modem NAK means "sent, without confirmation". Each message goes to the
+  first waiter that takes it (insertion order), so the ACK of a command is
+  never offered to the next one (M-1). Test: a hub that never clears.
+- **I-3 - one work loop**: a generation, bumped at every `up` and `down`, is
+  checked by the work loop, the scan and the round; an older loop ends at its
+  next turn (it is woken up).
+- **I-4 - types never change on a message**: a "set button" broadcast only
+  types an address of unknown type; a known type is kept (logged once) until
+  `/data` is reset by another hub address. `setValue` refuses any device
+  outside categories 01 and 02, whatever its kind.
+- **I-5 - docs**: the identity read at every connection; battery sensors and
+  the Smoke Bridge are never read again (a lost message is only caught up by
+  the next one, the cleanup or the heartbeat; not to be relied on alone for
+  smoke, CO or leaks).
+- **M-2**: brightness is confirmed only by the same percentage (100 % by
+  255); "on" (binary, switch, light, turn_on) by a level above 0.
+- **M-3**: a command has a timer at its deadline: refused then, "nothing was
+  sent", even while the request before it hangs (it is never written after).
+- **M-4**: the session (and the work generation) is checked again before
+  each status of the scan, the start and a lost connection.
+- **M-5**: a buffer with an odd or out-of-range position is counted and
+  logged (once a minute).
+- **M-6**: the trigger field `button` accepts 0 (some devices send group 0);
+  the docs describe the variable `name`.
+- **M-7**: the product table is deduplicated by the generator (the last line
+  wins, as pyinsteon's lookup).
+- Review scenarios kept in `test/review.test.js`.

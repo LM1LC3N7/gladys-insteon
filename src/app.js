@@ -7,7 +7,10 @@
 // - Identity: the Insteon address of the hub (Get IM Info) is pinned in /data
 //   at the first session (or typed in the configuration). Another hub at the
 //   same IP address (a DHCP swap) stops everything; an unreadable identity is
-//   not "another hub": it is asked again a minute later.
+//   not "another hub": it is asked again a minute later. The identity is read
+//   again at every connection: until then nothing is read nor sent.
+// - A device's type, once known, never changes on a message (only a reset of
+//   /data, by another hub address, forgets it).
 // - Devices: the database of the hub lists the linked devices, an ID request
 //   tells what each one is (battery devices sleep: their type is learnt when
 //   their set button is pressed, or at their next message). Kept in /data.
@@ -132,6 +135,7 @@ export class InsteonApp {
     this.chains = new Map();
     this.timersSet = new Set();
     this.idAskedAt = new Map();
+    this.retypeLogged = new Set();
     this.eventReadAt = new Map();
     this.recent = new Map();
     this.pendingEvents = [];
@@ -141,10 +145,13 @@ export class InsteonApp {
     // The session the event belongs to is taken when it comes, not when its turn comes.
     this.client.on('up', () => {
       const session = this.session;
+      // A new session: the hub is unknown until Get IM Info is read again in it.
+      this.forgetHub();
       this.guard(() => this.onUp(session));
     });
     this.client.on('down', (info) => {
       const session = this.session;
+      this.forgetHub();
       this.guard(() => this.onDown(info, session));
     });
     this.client.on('message', (message) => this.applyMessage(message));
@@ -258,6 +265,7 @@ export class InsteonApp {
     }
     await this.publishDevices();
     await this.publishStates();
+    if (session !== this.session) return;
     const problem = this.configProblem();
     if (problem) {
       await this.setStatus(false, problem);
@@ -423,7 +431,15 @@ export class InsteonApp {
     await this.publishTransports(DEVICE_TRANSPORTS.LOCAL);
     if (session !== this.session) return;
     this.identityDueAt = this.now();
-    this.work(session);
+    this.work(session, this.workGeneration);
+  }
+
+  /** The identity read in a session holds for that session only; its work loop ends with it. */
+  forgetHub() {
+    if (this.identity !== 'other') this.identity = 'unknown';
+    this.seenHub = undefined;
+    this.workGeneration = (this.workGeneration ?? 0) + 1;
+    this.wakeWork?.();
   }
 
   async onDown({ reason, refused }, session) {
@@ -456,6 +472,7 @@ export class InsteonApp {
       await this.setStatus(false, fill(T.unreachable, reason, Math.round(delay / 1000)));
       this.retryTimer = this.later(() => this.connect(session), delay);
     }
+    if (session !== this.session) return;
     await this.publishTransports(DEVICE_TRANSPORTS.UNREACHABLE);
   }
 
@@ -475,15 +492,18 @@ export class InsteonApp {
   }
 
   /** One loop per session; a reconnection never restarts a read in progress (its start is in /data). */
-  async work(session) {
-    const alive = () => session === this.session && this.client.connected;
+  async work(session, generation) {
+    // One loop per session and per connection: an older loop ends at its next turn.
+    const alive = () =>
+      session === this.session && generation === this.workGeneration && this.client.connected;
     while (alive()) {
       if (this.now() >= this.identityDueAt) {
-        await this.checkIdentity(session);
+        await this.checkIdentity(session, generation);
         if (this.identity === 'other') return;
         continue;
       }
-      if (this.identity === 'unknown' && !this.expectedHub()) {
+      // Nothing is read before the identity of the hub is read in this session.
+      if (this.identity !== 'ok') {
         await this.sleepWork(this.identityDueAt - this.now());
         continue;
       }
@@ -518,10 +538,10 @@ export class InsteonApp {
 
   /** The hub address the answers come to. */
   get hubAddress() {
-    return this.seenHub ?? this.expectedHub();
+    return this.identity === 'ok' ? this.seenHub : undefined;
   }
 
-  async checkIdentity(session) {
+  async checkIdentity(session, generation) {
     let info;
     try {
       info = await this.client.send(getImInfo(), {
@@ -531,7 +551,7 @@ export class InsteonApp {
     } catch {
       info = undefined;
     }
-    if (session !== this.session) return;
+    if (session !== this.session || generation !== this.workGeneration) return;
     if (!info) {
       // Unreadable is not "another hub": asked again in a minute.
       this.identityDueAt = this.now() + 60_000;
@@ -565,10 +585,13 @@ export class InsteonApp {
 
   /** The database of the hub, then an ID request to each device of unknown type. */
   async scanHub(session) {
-    const alive = () => session === this.session && this.client.connected;
+    const generation = this.workGeneration;
+    const alive = () =>
+      session === this.session && generation === this.workGeneration && this.client.connected;
     const memory = this.memory;
     memory.lastScanAt = this.now();
     await this.saveMemory();
+    if (!alive()) return;
     await this.setStatus(true, fill(T.scanning, '0'));
     const found = new Set();
     let records = 0;
@@ -660,8 +683,16 @@ export class InsteonApp {
     if (m.cmd1 !== CMD.ASSIGN_TO_GROUP && m.cmd1 !== CMD.DELETE_FROM_GROUP) return undefined;
     const [cat, subcat, fw] = m.toBytes;
     const old = this.devices.get(m.from);
-    if (old && old.cat === cat && old.subcat === subcat) return false;
-    if (!old && this.devices.size >= LIMITS.maxDevices) return false;
+    if (old) {
+      // A known type never changes on a message (forged or corrupted, it could make
+      // an I/O Linc or a lock look like a switch): kept until /data is reset.
+      if ((old.cat !== cat || old.subcat !== subcat) && !this.retypeLogged.has(m.from)) {
+        this.retypeLogged.add(m.from);
+        this.logger.warn(`Insteon: ${addressText(m.from)} announced another type, ignored`);
+      }
+      return false;
+    }
+    if (this.devices.size >= LIMITS.maxDevices) return false;
     this.devices.set(m.from, newDevice(m.from, cat, subcat, fw));
     if (this.addresses.size < LIMITS.maxDevices) this.addresses.add(m.from);
     return true;
@@ -669,7 +700,9 @@ export class InsteonApp {
 
   /** The status round: every device that answers a status request. */
   async round(session) {
-    const alive = () => session === this.session && this.client.connected;
+    const generation = this.workGeneration;
+    const alive = () =>
+      session === this.session && generation === this.workGeneration && this.client.connected;
     // Written before the round: a restart or a reconnection does not read again sooner.
     this.memory.lastRoundAt = this.now();
     await this.saveMemory();
@@ -732,7 +765,8 @@ export class InsteonApp {
 
   /** A message of the hub, applied to the model at once; Gladys follows once per turn. */
   applyMessage(m) {
-    if (this.identity === 'other') return;
+    // Nothing is taken from a hub whose identity was not read in this session.
+    if (this.identity !== 'ok') return;
     if (m.id !== IM.STANDARD_RECEIVED && m.id !== IM.EXTENDED_RECEIVED) return;
     const direct = [
       TYPE.DIRECT,
@@ -983,9 +1017,12 @@ export class InsteonApp {
     } else {
       throw this.refused(T.readOnly);
     }
+    // Only dimmers and switches (categories 01 and 02) ever take a command.
+    if (device.cat !== 0x01 && device.cat !== 0x02) throw this.refused(T.readOnly);
     if (this.identity === 'other') throw this.refused(T.otherHubCommand);
-    if (!this.hubAddress) throw this.refused(T.hubUnknown);
-    return this.command(device, level, asked, gate);
+    // The hub must have been identified in this very session.
+    if (this.identity !== 'ok' || !this.hubAddress) throw this.refused(T.hubUnknown);
+    return this.command(device, level, asked, gate, key === 'brightness');
   }
 
   /**
@@ -993,7 +1030,7 @@ export class InsteonApp {
    * the confirmation is awaited outside it), confirmed by the device's ACK
    * carrying a level equal to the one asked.
    */
-  async command(device, level, asked, gate) {
+  async command(device, level, asked, gate, exact) {
     const text = addressText(device.address);
     const what =
       level === 255
@@ -1013,7 +1050,7 @@ export class InsteonApp {
         urgent: true,
         sendBy: asked + TIMINGS.sendBy,
         // Right before the request: the option or the declaration, and the hub.
-        beforeSend: () => gate() && this.identity !== 'other' && this.hubAddress === hub,
+        beforeSend: () => gate() && this.identity === 'ok' && this.seenHub === hub,
         match: (m) => {
           if (m.id !== IM.STANDARD_RECEIVED || m.from !== device.address || m.to !== hub)
             return undefined;
@@ -1041,9 +1078,9 @@ export class InsteonApp {
     const confirmed =
       level === 0
         ? answer.level === 0
-        : level === 255
-          ? answer.level > 0
-          : percent(answer.level) === percent(level);
+        : exact
+          ? percent(answer.level) === percent(level)
+          : answer.level > 0;
     if (!confirmed) {
       this.logger.warn(`Command sent, the device answered level ${answer.level} (${what.en})`);
       device.level = answer.level;

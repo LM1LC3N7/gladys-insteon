@@ -240,7 +240,7 @@
             "en": "Button (group)",
             "fr": "Bouton (groupe)"
           },
-          "min": 1,
+          "min": 0,
           "max": 255
         },
         {

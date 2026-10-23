@@ -62,8 +62,9 @@ default, checked when asked and right before the request; nothing that may
 open a garage door or a lock is commanded; a command leaves before its
 deadline or not at all and is confirmed only by the level the device answers;
 a command that may have left is never reported "not sent"; the ack never
-waits for the publication; an answer is only taken from what the hub received
-after the clear that precedes its message; the hub identity is pinned; a
+waits for the publication; an answer is only taken after the echo of its own message;
+the hub identity is pinned and read again at every connection, nothing read
+nor sent before; a
 refused password stops for good; never a read sooner than the interval
 (restart, reconnection, test button); Maps only for what the network or the
 configuration names (no prototype pollution).
