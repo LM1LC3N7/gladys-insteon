@@ -6,8 +6,8 @@
     "en": "Insteon network through the Hub 2245: dimmers, switches, sensors and keypad buttons.",
     "fr": "Réseau Insteon par le Hub 2245 : variateurs, interrupteurs, capteurs et boutons."
   },
-  "version": "0.1.0",
-  "docker_image": "ghcr.io/lm1lc3n7/gladys-insteon:0.1.0",
+  "version": "0.1.1",
+  "docker_image": "ghcr.io/lm1lc3n7/gladys-insteon:0.1.1",
   "gladys_version": ">=5.1.0",
   "cover_image": "https://raw.githubusercontent.com/LM1LC3N7/gladys-insteon/main/cover.png",
   "categories": ["protocols", "lighting", "security"],

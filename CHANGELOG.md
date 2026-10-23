@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-23
+
 ### Added
 
 - Insteon Hub 2245 over HTTP on the local network (protocol ported from
@@ -47,3 +49,6 @@ the notes of the version's GitHub Release.
 - Outages no longer add background loops (extra identity reads).
 - Docs: battery sensors and the Smoke Bridge are never read again; the
   variable `name` and group 0 of the trigger.
+
+[Unreleased]: https://github.com/LM1LC3N7/gladys-insteon/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-insteon/releases/tag/v0.1.1
